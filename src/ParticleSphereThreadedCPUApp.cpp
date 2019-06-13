@@ -28,6 +28,8 @@ const int NUM_PARTICLES = 400e3;
 const double TARGET_SIMULATION_HZ = 60.0;
 const double MAX_SIMULATION_FRAME_DURATION_SECONDS = (1.0 / TARGET_SIMULATION_HZ);
 
+const bool LIVING_DANGEROUSLY = true;
+
 /**
  Particle type holds information for rendering and simulation.
  */
@@ -246,9 +248,17 @@ void ParticleSphereThreadedCPUApp::updateThread(ThreadState& state)
 
     // lock and write our section of particle state to the appropriate place in the read buffer
     {
-        std::lock_guard<std::mutex> lock(state.accessLock);
-        memcpy(_readParticles.data() + state.idx,
-            _writeParticles.data() + state.idx, state.count * sizeof(Particle));
+        if (LIVING_DANGEROUSLY)
+        {
+            memcpy(_readParticles.data() + state.idx,
+                   _writeParticles.data() + state.idx, state.count * sizeof(Particle));
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(state.accessLock);
+            memcpy(_readParticles.data() + state.idx,
+                   _writeParticles.data() + state.idx, state.count * sizeof(Particle));
+        }
     }
 }
 
@@ -260,7 +270,7 @@ void ParticleSphereThreadedCPUApp::update()
 
     // for each thread state, if available, copy particle data subsection over
     for (auto& state : _threadStates) {
-        if (state->accessLock.try_lock()) {
+        if (LIVING_DANGEROUSLY || state->accessLock.try_lock()) {
             memcpy(gpuMem + (state->idx * sizeof(Particle)), _readParticles.data() + state->idx, state->count * sizeof(Particle));
             state->accessLock.unlock();
         }
@@ -289,6 +299,7 @@ void ParticleSphereThreadedCPUApp::cleanup()
 
 CINDER_APP(ParticleSphereThreadedCPUApp, RendererGl,
     [](App::Settings* settings) {
+        settings->setHighDensityDisplayEnabled(true);
         settings->setWindowSize(1280, 720);
         settings->setMultiTouchEnabled(false);
     })
