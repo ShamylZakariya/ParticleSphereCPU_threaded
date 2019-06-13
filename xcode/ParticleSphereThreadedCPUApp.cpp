@@ -38,7 +38,7 @@ struct Disturbance
 	float force;
 };
 
-struct UpdateThreadState
+struct ThreadState
 {
 	size_t idx;
 	size_t count;
@@ -47,13 +47,13 @@ struct UpdateThreadState
 	std::chrono::high_resolution_clock::time_point lastUpdateTime;
 	SafeQueue<Disturbance> disturbances;
 	
-	UpdateThreadState():
+	ThreadState():
 	idx(0),
 	count(0),
 	lastUpdateTime(std::chrono::high_resolution_clock::now())
 	{}
 	
-	UpdateThreadState(std::vector<Particle> &particles, size_t idx, size_t count):
+	ThreadState(std::vector<Particle> &particles, size_t idx, size_t count):
 		idx(idx),
 		lastUpdateTime(std::chrono::high_resolution_clock::now())
 	{
@@ -70,8 +70,12 @@ struct UpdateThreadState
 	
 };
 
-// Home many particles to create. (200k)
+// How many particles to create. (200k)
 const int NUM_PARTICLES = 200e3;
+
+// target simulation rate
+const double TARGET_SIMULATION_HZ = 60.0;
+const double MAX_SIMULATION_FRAME_DURATION_SECONDS = (1.0 / TARGET_SIMULATION_HZ);
 
 /**
  Simple particle simulation with Verlet integration and mouse interaction.
@@ -88,7 +92,7 @@ public:
 	void cleanup() override;
 	
 private:
-	void updateThread(UpdateThreadState &state);
+	void updateThread(ThreadState &state);
 	
 private:
 	// Particle data on CPU.
@@ -101,7 +105,7 @@ private:
 	
 	std::mutex _particleBufferLock;
 	std::atomic<bool> _running;
-	std::vector<shared_ptr<UpdateThreadState>> _threadStates;
+	std::vector<shared_ptr<ThreadState>> _threadStates;
 	std::vector<std::thread> _threads;
 };
 
@@ -199,7 +203,7 @@ void ParticleSphereThreadedCPUApp::setup()
 	size_t count = static_cast<size_t>(ceil(static_cast<double>(NUM_PARTICLES) / static_cast<double>(threadCount)));
 	for (int i = 0; i < threadCount; i++)
 	{
-		_threadStates.emplace_back(std::make_shared<UpdateThreadState>(_writeParticles, idx, count));
+		_threadStates.emplace_back(std::make_shared<ThreadState>(_writeParticles, idx, count));
 		idx += count;
 
 		_threads.emplace_back(std::thread([this, i](){
@@ -211,18 +215,15 @@ void ParticleSphereThreadedCPUApp::setup()
 	}
 }
 
-#define TARGET_HZ 60.0
-#define MAX_WAIT_SECONDS (1.0 / TARGET_HZ)
-
-void ParticleSphereThreadedCPUApp::updateThread(UpdateThreadState &state)
+void ParticleSphereThreadedCPUApp::updateThread(ThreadState &state)
 {
 	std::chrono::high_resolution_clock::time_point now = std::chrono::high_resolution_clock::now();
 	double elapsedSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(now - state.lastUpdateTime).count();
 	state.lastUpdateTime = now;
 	
-	if (elapsedSeconds < MAX_WAIT_SECONDS)
+	if (elapsedSeconds < MAX_SIMULATION_FRAME_DURATION_SECONDS)
 	{
-		long millis = static_cast<long>(std::floor((MAX_WAIT_SECONDS - elapsedSeconds) * 1000.0));
+		long millis = static_cast<long>(std::floor((MAX_SIMULATION_FRAME_DURATION_SECONDS - elapsedSeconds) * 1000.0));
 		std::this_thread::sleep_for(std::chrono::milliseconds(millis));
 	}
 	
@@ -239,7 +240,7 @@ void ParticleSphereThreadedCPUApp::updateThread(UpdateThreadState &state)
 	
 	// Run Verlet integration on all particles on the CPU.
 	double hz = 1.0/elapsedSeconds;
-	hz = min(max(hz, 1.0), TARGET_HZ);
+	hz = min(max(hz, 1.0), TARGET_SIMULATION_HZ);
 
 	static const int cMax = 90;
 	static int c = 0;
