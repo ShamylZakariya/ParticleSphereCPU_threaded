@@ -43,6 +43,7 @@ struct ThreadState {
     vector<Particle>::iterator first;
     vector<Particle>::iterator last;
     std::chrono::high_resolution_clock::time_point lastUpdateTime;
+    std::mutex accessLock;
     SafeQueue<Disturbance> disturbances;
 
     ThreadState()
@@ -100,7 +101,6 @@ private:
     // Batch for rendering particles with default shader.
     gl::BatchRef _particleBatch;
 
-    std::mutex _particleBufferLock;
     std::atomic<bool> _running;
     std::vector<shared_ptr<ThreadState>> _threadStates;
     std::vector<std::thread> _threads;
@@ -202,13 +202,14 @@ void ParticleSphereThreadedCPUApp::setup()
     size_t idx = 0;
     size_t count = static_cast<size_t>(ceil(static_cast<double>(NUM_PARTICLES) / static_cast<double>(threadCount)));
     for (int i = 0; i < threadCount; i++) {
-        _threadStates.emplace_back(
-            std::make_shared<ThreadState>(_writeParticles, idx, count));
+
+        auto state = std::make_shared<ThreadState>(_writeParticles, idx, count);
+        _threadStates.push_back(state);
         idx += count;
 
-        _threads.emplace_back(std::thread([this, i]() {
+        _threads.emplace_back(std::thread([this, state]() {
             while (_running) {
-                updateThread(*(_threadStates[i].get()));
+                updateThread(*(state.get()));
             }
         }));
     }
@@ -264,7 +265,7 @@ void ParticleSphereThreadedCPUApp::updateThread(ThreadState& state)
     }
 
     {
-        std::lock_guard<std::mutex> lock(_particleBufferLock);
+        std::lock_guard<std::mutex> lock(state.accessLock);
         memcpy(_readParticles.data() + state.idx,
             _writeParticles.data() + state.idx, state.count * sizeof(Particle));
     }
@@ -273,13 +274,15 @@ void ParticleSphereThreadedCPUApp::updateThread(ThreadState& state)
 void ParticleSphereThreadedCPUApp::update()
 {
     // Copy particle data onto the GPU.
-    // Map the GPU memory and write over it.
-    void* gpuMem = _particleVbo->mapReplace();
+    // Get writeable buffer to GPU memory
+    uint8_t* gpuMem = static_cast<uint8_t*>(_particleVbo->mapReplace());
 
-    {
-        std::lock_guard<std::mutex> lock(_particleBufferLock);
-        memcpy(gpuMem, _readParticles.data(),
-            _readParticles.size() * sizeof(Particle));
+    // for each thread state, if available, copy particle data subsection over
+    for (auto& state : _threadStates) {
+        if (state->accessLock.try_lock()) {
+            memcpy(gpuMem + (state->idx * sizeof(Particle)), _readParticles.data() + state->idx, state->count * sizeof(Particle));
+            state->accessLock.unlock();
+        }
     }
 
     _particleVbo->unmap();
