@@ -6,6 +6,7 @@
 //
 //	Author: David Wicks
 //	License: BSD Simplified
+//	Adapted by Shamyl Zakariya for multithreaded experimentation
 //
 
 #include "cinder/app/App.h"
@@ -107,6 +108,7 @@ private:
 	std::atomic<bool> _running;
 	std::vector<shared_ptr<ThreadState>> _threadStates;
 	std::vector<std::thread> _threads;
+	vec3 _lastMousePosition;
 };
 
 void ParticleSphereThreadedCPUApp::setup()
@@ -143,7 +145,7 @@ void ParticleSphereThreadedCPUApp::setup()
 	
 	// Create mesh by pairing our particle layout with our particle Vbo.
 	// A VboMesh is an array of layout + vbo pairs
-	auto mesh = gl::VboMesh::create( _readParticles.size(), GL_POINTS, { { particleLayout, _particleVbo } } );
+	auto mesh = gl::VboMesh::create( static_cast<uint32_t>(_readParticles.size()), GL_POINTS, { { particleLayout, _particleVbo } } );
 #if ! defined( CINDER_GL_ES )
 	_particleBatch = gl::Batch::create( mesh, gl::getStockShader( gl::ShaderDef().color() ) );
 	gl::pointSize( 1.0f );
@@ -156,25 +158,24 @@ void ParticleSphereThreadedCPUApp::setup()
 	//	Handle mouse down/move by queueing up "disturbances" to process in update thread
 	//
 	
+	_lastMousePosition = vec3(0,0,0);
 	const double Thresh2 = 10 * 10;
-	auto canEnqueueDisturbance = [this, Thresh2](const vec3 position) -> bool {
-		return true;
-//		Disturbance d;
-//		if (_disturbances.peek(d)) {
-//			return length2(position - d.center) > Thresh2;
-//		}
-//		return true;
+	auto canEnqueueDisturbance = [this,Thresh2](const vec3 position) -> bool {
+		if (length2(position - _lastMousePosition) > Thresh2)
+		{
+			_lastMousePosition = position;
+			return true;
+		}
+		return false;
 	};
 	
 	// Disturb particles a lot on mouse down.
 	getWindow()->getSignalMouseDown().connect( [this, canEnqueueDisturbance]( MouseEvent event ) {
 		vec3 mouse( event.getPos(), 0.0f );
-		if (canEnqueueDisturbance(mouse)) {
-			const auto d = Disturbance{ mouse, 500.0f };
-			for(auto &state : _threadStates)
-			{
-				state->disturbances.enqueue(d);
-			}
+		const auto d = Disturbance{ mouse, 500.0f };
+		for(auto &state : _threadStates)
+		{
+			state->disturbances.enqueue(d);
 		}
 	} );
 	
