@@ -21,6 +21,13 @@ using namespace ci;
 using namespace ci::app;
 using namespace std;
 
+// How many particles to create
+const int NUM_PARTICLES = 400e3;
+
+// target simulation rate
+const double TARGET_SIMULATION_HZ = 60.0;
+const double MAX_SIMULATION_FRAME_DURATION_SECONDS = (1.0 / TARGET_SIMULATION_HZ);
+
 /**
  Particle type holds information for rendering and simulation.
  */
@@ -45,17 +52,20 @@ struct ThreadState {
     std::chrono::high_resolution_clock::time_point lastUpdateTime;
     std::mutex accessLock;
     SafeQueue<Disturbance> disturbances;
+    double updateHz;
 
     ThreadState()
         : idx(0)
         , count(0)
         , lastUpdateTime(std::chrono::high_resolution_clock::now())
+        , updateHz(TARGET_SIMULATION_HZ)
     {
     }
 
     ThreadState(std::vector<Particle>& particles, size_t idx, size_t count)
         : idx(idx)
         , lastUpdateTime(std::chrono::high_resolution_clock::now())
+        , updateHz(TARGET_SIMULATION_HZ)
     {
         first = particles.begin() + idx;
 
@@ -67,13 +77,6 @@ struct ThreadState {
         this->count = count;
     }
 };
-
-// How many particles to create. (200k)
-const int NUM_PARTICLES = 200e3;
-
-// target simulation rate
-const double TARGET_SIMULATION_HZ = 60.0;
-const double MAX_SIMULATION_FRAME_DURATION_SECONDS = (1.0 / TARGET_SIMULATION_HZ);
 
 /**
  Simple particle simulation with Verlet integration and mouse interaction.
@@ -93,18 +96,20 @@ private:
     void updateThread(ThreadState& state);
 
 private:
-    // Particle data on CPU.
+    // particle data which will be written to by worker threads
     vector<Particle> _writeParticles;
+
+    // particle data which will be read from by main thread to pipe to GPU
     vector<Particle> _readParticles;
-    // Buffer holding raw particle data on GPU, written to every update().
+
+    // cinder abstractions
     gl::VboRef _particleVbo;
-    // Batch for rendering particles with default shader.
     gl::BatchRef _particleBatch;
 
+    // threading
     std::atomic<bool> _running;
     std::vector<shared_ptr<ThreadState>> _threadStates;
     std::vector<std::thread> _threads;
-    vec3 _lastMousePosition;
 };
 
 void ParticleSphereThreadedCPUApp::setup()
@@ -115,8 +120,8 @@ void ParticleSphereThreadedCPUApp::setup()
     const float inclination = M_PI / _writeParticles.size();
     const float radius = 160.0f;
     vec3 center = vec3(getWindowCenter(), 0.0f);
-    for (int i = 0; i < _writeParticles.size();
-         ++i) { // assign starting values to particles.
+    for (int i = 0; i < _writeParticles.size(); ++i) {
+        // assign starting values to particles.
         float x = radius * sin(inclination * i) * cos(azimuth * i);
         float y = radius * cos(inclination * i);
         float z = radius * sin(inclination * i) * sin(azimuth * i);
@@ -154,23 +159,12 @@ void ParticleSphereThreadedCPUApp::setup()
 #endif
 
     //
-    //	Handle mouse down/move by queueing up "disturbances" to process in
-    //update thread
+    //	Handle mouse down/move by queueing up "disturbances" to process in update thread
     //
-
-    _lastMousePosition = vec3(0, 0, 0);
-    const double Thresh2 = 10 * 10;
-    auto canEnqueueDisturbance = [this, Thresh2](const vec3 position) -> bool {
-        if (length2(position - _lastMousePosition) > Thresh2) {
-            _lastMousePosition = position;
-            return true;
-        }
-        return false;
-    };
 
     // Disturb particles a lot on mouse down.
     getWindow()->getSignalMouseDown().connect(
-        [this, canEnqueueDisturbance](MouseEvent event) {
+        [this](MouseEvent event) {
             vec3 mouse(event.getPos(), 0.0f);
             const auto d = Disturbance { mouse, 500.0f };
             for (auto& state : _threadStates) {
@@ -180,24 +174,22 @@ void ParticleSphereThreadedCPUApp::setup()
 
     // Disturb particle a little on mouse drag.
     getWindow()->getSignalMouseDrag().connect(
-        [this, canEnqueueDisturbance](MouseEvent event) {
+        [this](MouseEvent event) {
             vec3 mouse(event.getPos(), 0.0f);
-            if (canEnqueueDisturbance(mouse)) {
-                const auto d = Disturbance { mouse, 120.0f };
-                for (auto& state : _threadStates) {
-                    state->disturbances.enqueue(d);
-                }
+            const auto d = Disturbance { mouse, 120.0f };
+            for (auto& state : _threadStates) {
+                state->disturbances.enqueue(d);
             }
         });
 
     //
-    // Start work thread
+    // Start work threads to act on slices of the _writeParticle store
     //
 
     _running.store(true);
 
     const size_t threadCount = max(std::thread::hardware_concurrency(), 1u);
-    std::cout << "Creating " << threadCount << " particle threads" << std::endl;
+    std::cout << "Creating " << threadCount << " worker threads" << std::endl;
 
     size_t idx = 0;
     size_t count = static_cast<size_t>(ceil(static_cast<double>(NUM_PARTICLES) / static_cast<double>(threadCount)));
@@ -218,20 +210,19 @@ void ParticleSphereThreadedCPUApp::setup()
 void ParticleSphereThreadedCPUApp::updateThread(ThreadState& state)
 {
     std::chrono::high_resolution_clock::time_point now = std::chrono::high_resolution_clock::now();
-    double elapsedSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(
-        now - state.lastUpdateTime)
-                                .count();
+    double elapsedSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(now - state.lastUpdateTime).count();
     state.lastUpdateTime = now;
 
+    // if we have some lag time, sleep
     if (elapsedSeconds < MAX_SIMULATION_FRAME_DURATION_SECONDS) {
         long millis = static_cast<long>(std::floor(
             (MAX_SIMULATION_FRAME_DURATION_SECONDS - elapsedSeconds) * 1000.0));
         std::this_thread::sleep_for(std::chrono::milliseconds(millis));
     }
 
+    // process queued disturbances to apply
     while (!state.disturbances.empty()) {
         Disturbance d = state.disturbances.dequeue();
-
         for (auto i = state.first; i != state.last; ++i) {
             vec3 dir = i->pos - d.center;
             float d2 = length2(dir);
@@ -239,23 +230,12 @@ void ParticleSphereThreadedCPUApp::updateThread(ThreadState& state)
         }
     }
 
-    // Run Verlet integration on all particles on the CPU.
+    // Determine the approximate run hz, then
+    // run Verlet integration on all particles on the CPU.
     double hz = 1.0 / elapsedSeconds;
     hz = min(max(hz, 1.0), TARGET_SIMULATION_HZ);
-
-    static const int cMax = 90;
-    static int c = 0;
-    static double hzAcc = 0;
-
-    hzAcc += hz;
-    c++;
-    if (c >= cMax) {
-        CI_LOG_D("hz: " << hzAcc / cMax);
-        c = 0;
-        hzAcc = 0;
-    }
-
-    float dt2 = static_cast<float>(1.0 / (hz * hz));
+    state.updateHz = (state.updateHz + hz) * 0.5;
+    float dt2 = static_cast<float>(1.0 / (state.updateHz * state.updateHz));
 
     for (auto i = state.first; i != state.last; ++i) {
         vec3 vel = (i->pos - i->ppos) * i->damping;
@@ -264,6 +244,7 @@ void ParticleSphereThreadedCPUApp::updateThread(ThreadState& state)
         i->pos += vel + acc * dt2;
     }
 
+    // lock and write our section of particle state to the appropriate place in the read buffer
     {
         std::lock_guard<std::mutex> lock(state.accessLock);
         memcpy(_readParticles.data() + state.idx,
