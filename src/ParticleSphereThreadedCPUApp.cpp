@@ -28,7 +28,7 @@ const int NUM_PARTICLES = 400e3;
 const double TARGET_SIMULATION_HZ = 60.0;
 const double MAX_SIMULATION_FRAME_DURATION_SECONDS = (1.0 / TARGET_SIMULATION_HZ);
 
-const bool LIVING_DANGEROUSLY = true;
+const bool LIVING_DANGEROUSLY = false;
 
 /**
  Particle type holds information for rendering and simulation.
