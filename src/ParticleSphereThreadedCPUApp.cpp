@@ -29,6 +29,7 @@ const double TARGET_SIMULATION_HZ = 60.0;
 const double MAX_SIMULATION_FRAME_DURATION_SECONDS = (1.0 / TARGET_SIMULATION_HZ);
 
 const bool LIVING_DANGEROUSLY = false;
+const bool SHUFFLE_PARTICLES = true;
 
 /**
  Particle type holds information for rendering and simulation.
@@ -135,6 +136,11 @@ void ParticleSphereThreadedCPUApp::setup()
         p.damping = Rand::randFloat(0.94f, 0.95f);
         p.color = Color(CM_HSV, lmap<float>(i, 0.0f, _writeParticles.size(), 0.0f, 0.66f),
             1.0f, 1.0f);
+    }
+    
+    if (SHUFFLE_PARTICLES)
+    {
+        std::random_shuffle(_writeParticles.begin(), _writeParticles.end());
     }
 
     // Create particle buffer on GPU and copy over data.
